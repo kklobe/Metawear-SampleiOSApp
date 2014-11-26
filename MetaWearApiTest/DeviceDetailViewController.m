@@ -77,6 +77,8 @@
 
 @property (strong, nonatomic) UIView *grayScreen;
 @property (strong, nonatomic) NSArray *accelerometerDataArray;
+@property (strong, nonatomic) NSMutableArray *accelBuffer;
+
 @property (nonatomic) BOOL accelerometerRunning;
 @property (nonatomic) BOOL switchRunning;
 @end
@@ -300,6 +302,11 @@
 
 - (IBAction)startHapticDriverPressed:(id)sender
 {
+    [self fireHapticMotor];
+}
+
+- (void)fireHapticMotor
+{
     uint8_t dcycle = [self.hapticDutyCycle.text intValue];
     uint16_t pwidth = [self.hapticPulseWidth.text intValue];
     [self.device.hapticBuzzer startHapticWithDutyCycle:dcycle pulseWidth:pwidth completion:nil];
@@ -382,12 +389,65 @@
     self.accelerometerRunning = YES;
     // These variables are used for data recording
     NSMutableArray *array = [[NSMutableArray alloc] initWithCapacity:1000];
-    self.accelerometerDataArray = array;
     
+    self.accelerometerDataArray = array;
+
+    self.accelBuffer = [[NSMutableArray alloc] initWithCapacity:256];
+    
+    int accelWindow;
+    
+    switch (self.device.accelerometer.sampleFrequency) {
+        case MBLAccelerometerSampleFrequency50Hz:
+            accelWindow = 150;
+            break;
+        case MBLAccelerometerSampleFrequency12_5Hz:
+            accelWindow = 36;
+            break;
+        default:
+            accelWindow = 0;
+            break;
+    }
+
     [self.device.accelerometer.dataReadyEvent startNotificationsWithHandler:^(MBLAccelerometerData *acceleration, NSError *error) {
         [self.accelerometerGraph addX:acceleration.x y:acceleration.y z:acceleration.z];
         // Add data to data array for saving
-        [array addObject:acceleration];
+        //[array addObject:acceleration];
+        [self.accelBuffer addObject:acceleration];
+
+        if (self.accelBuffer.count == accelWindow) {
+            float meanx = 0, meany = 0, meanz = 0, maxx = 0, maxy = 0, maxz = 0;
+            for (unsigned int i = 0; i < accelWindow; i++) {
+                
+                MBLAccelerometerData *curAD = [self.accelBuffer objectAtIndex:i];
+                
+                if (curAD.x > maxx) {
+                    maxx = curAD.x;
+                }
+                
+                if (curAD.y > maxy) {
+                    maxy = curAD.y;
+                }
+                
+                if (curAD.z > maxz) {
+                    maxz = curAD.z;
+                }
+                
+                meanx += curAD.x;
+                meany += curAD.y;
+                meanz += curAD.z;
+            }
+            
+            meanx /= accelWindow;
+            meany /= accelWindow;
+            meanz /= accelWindow;
+            
+            [self.accelBuffer removeObjectAtIndex:0];
+            
+            if (meany > -1.1f && meany < -0.9f) {
+                [self fireHapticMotor];
+                [self.accelBuffer removeAllObjects];
+            }
+        }
     }];
 }
 
