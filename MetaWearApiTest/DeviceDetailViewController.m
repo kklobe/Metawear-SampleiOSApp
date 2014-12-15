@@ -54,6 +54,7 @@
 
 @property (weak, nonatomic) IBOutlet APLGraphView *accelerometerGraph;
 
+@property (weak, nonatomic) IBOutlet UISwitch *autoReconnect;
 @property (weak, nonatomic) IBOutlet UILabel *mechanicalSwitchLabel;
 @property (weak, nonatomic) IBOutlet UILabel *batteryLevelLabel;
 @property (weak, nonatomic) IBOutlet UILabel *rssiLevelLabel;
@@ -65,6 +66,7 @@
 
 @property (weak, nonatomic) IBOutlet UIButton *startAccelerometer;
 @property (weak, nonatomic) IBOutlet UIButton *stopAccelerometer;
+@property (weak, nonatomic) IBOutlet UIButton *snoozeStreamingButton;
 @property (weak, nonatomic) IBOutlet UIButton *startLog;
 @property (weak, nonatomic) IBOutlet UIButton *stopLog;
 
@@ -81,6 +83,11 @@
 
 @property (nonatomic) BOOL accelerometerRunning;
 @property (nonatomic) BOOL switchRunning;
+@property (nonatomic) BOOL canFireHapticMotor;
+
+@property (strong, nonatomic) NSTimer *repeatTimer;
+@property (strong, nonatomic) NSTimer *snoozeTimer;
+@property (strong, nonatomic) NSTimer *reconnectTimer;
 @end
 
 @implementation DeviceDetailViewController
@@ -94,6 +101,7 @@
     self.grayScreen.alpha = 0.4;
     [self.view addSubview:self.grayScreen];
     
+    self.snoozeStreamingButton.enabled = NO;
     [self.stopAccelerometer setEnabled:NO];
     [self.stopLog setEnabled:NO];
 }
@@ -120,11 +128,28 @@
     }
 }
 
+- (void)reconnectTimerElapsed:(NSTimer *)theTimer
+{
+    NSLog(@"reconnectTimerElapsed fired!");
+    [self connectDevice:YES];
+}
+
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
     if (self.device.state == CBPeripheralStateDisconnected) {
         [self setConnected:NO];
         [self.scrollView scrollRectToVisible:CGRectMake(0, 0, 10, 10) animated:YES];
+        if (self.autoReconnect.on) {
+            NSLog(@"Setting reconnectTimer (0)");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.reconnectTimer =
+                [NSTimer scheduledTimerWithTimeInterval:10.0
+                                                 target:self
+                                               selector:@selector(reconnectTimerElapsed:)
+                                               userInfo:nil
+                                                repeats:NO];
+            });
+        }
     }
 }
 
@@ -145,9 +170,16 @@
             if (error) {
                 hud.labelText = error.localizedDescription;
                 [hud hide:YES afterDelay:2];
+                if (self.autoReconnect.on) {
+                    NSLog(@"Setting reconnectTimer (1)");
+
+                    self.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:10.0 target:self selector:@selector(reconnectTimerElapsed:) userInfo:nil repeats:NO];
+                }
+
             } else {
                 hud.labelText = @"Connected!";
                 [hud hide:YES afterDelay:0.5];
+                [self startAccelerationPressed:self];
             }
         }];
     } else {
@@ -161,6 +193,11 @@
             } else {
                 hud.labelText = @"Disconnected!";
                 [hud hide:YES afterDelay:0.5];
+                if (self.autoReconnect.on) {
+                    NSLog(@"Setting reconnectTimer (2)");
+
+                    self.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:10 target:self selector:@selector(reconnectTimerElapsed:) userInfo:nil repeats:NO];
+                }
             }
         }];
     }
@@ -362,8 +399,21 @@
     }];
 }
 
+- (void)repeatTimerElapsed:(NSTimer *)theTimer
+{
+    self.canFireHapticMotor = YES;
+}
+
+- (void)snoozeTimerElapsed:(NSTimer *)theTimer
+{
+    [self startAccelerationPressed:self];
+    self.snoozeStreamingButton.enabled = YES;
+}
+
 - (IBAction)startAccelerationPressed:(id)sender
 {
+    [self.snoozeTimer invalidate];
+    
     if (self.accelerometerScale.selectedSegmentIndex == 0) {
         self.accelerometerGraph.fullScale = 2;
     } else if (self.accelerometerScale.selectedSegmentIndex == 1) {
@@ -384,6 +434,8 @@
    
     [self.startAccelerometer setEnabled:NO];
     [self.stopAccelerometer setEnabled:YES];
+    self.snoozeStreamingButton.enabled = YES;
+
     [self.startLog setEnabled:NO];
     [self.stopLog setEnabled:NO];
     self.accelerometerRunning = YES;
@@ -394,28 +446,34 @@
 
     self.accelBuffer = [[NSMutableArray alloc] initWithCapacity:256];
     
+    const int windowSeconds = 3;
+    const int repeatInterval = 5; // in seconds
+    
     int accelWindow;
     
     switch (self.device.accelerometer.sampleFrequency) {
         case MBLAccelerometerSampleFrequency50Hz:
-            accelWindow = 150;
+            accelWindow = 50 * windowSeconds;
             break;
         case MBLAccelerometerSampleFrequency12_5Hz:
-            accelWindow = 36;
+            accelWindow = 13 * windowSeconds;
             break;
         default:
             accelWindow = 0;
             break;
     }
 
+    self.canFireHapticMotor = YES;
+    
     [self.device.accelerometer.dataReadyEvent startNotificationsWithHandler:^(MBLAccelerometerData *acceleration, NSError *error) {
         [self.accelerometerGraph addX:acceleration.x y:acceleration.y z:acceleration.z];
         // Add data to data array for saving
-        //[array addObject:acceleration];
+        [array addObject:acceleration];
         [self.accelBuffer addObject:acceleration];
 
         if (self.accelBuffer.count == accelWindow) {
-            float meanx = 0, meany = 0, meanz = 0, maxx = 0, maxy = 0, maxz = 0;
+            float meanx = 0, meany = 0, meanz = 0, maxx = FLT_MIN, maxy = FLT_MIN, maxz = FLT_MIN, minx = FLT_MAX, miny = FLT_MAX, minz = FLT_MAX;
+            
             for (unsigned int i = 0; i < accelWindow; i++) {
                 
                 MBLAccelerometerData *curAD = [self.accelBuffer objectAtIndex:i];
@@ -424,12 +482,24 @@
                     maxx = curAD.x;
                 }
                 
+                if (curAD.x < minx) {
+                    minx = curAD.x;
+                }
+                
                 if (curAD.y > maxy) {
                     maxy = curAD.y;
                 }
                 
+                if (curAD.y < miny) {
+                    miny = curAD.y;
+                }
+                
                 if (curAD.z > maxz) {
                     maxz = curAD.z;
+                }
+                
+                if (curAD.z < minz) {
+                    minz = curAD.z;
                 }
                 
                 meanx += curAD.x;
@@ -443,12 +513,25 @@
             
             [self.accelBuffer removeObjectAtIndex:0];
             
-            if (meany > -1.1f && meany < -0.9f) {
-                [self fireHapticMotor];
-                [self.accelBuffer removeAllObjects];
+            // basic gesture recognition
+            if (meany > -1.2f && meany < -0.8f) {
+                if (self.canFireHapticMotor) {
+                    [self fireHapticMotor];
+                    self.canFireHapticMotor = NO;
+                    self.repeatTimer = [NSTimer scheduledTimerWithTimeInterval:repeatInterval target:self selector:@selector(repeatTimerElapsed:) userInfo:nil repeats:NO];
+                }
             }
+            
+            // snooze check, triple-tap within the window
         }
     }];
+}
+
+- (IBAction)snoozeAccelerometer:(id)sender {
+    [self stopAccelerationPressed:self];
+    
+    const int snoozeInterval = 420; // 7 min
+    self.snoozeTimer = [NSTimer scheduledTimerWithTimeInterval:snoozeInterval target:self selector:@selector(snoozeTimerElapsed:) userInfo:nil repeats:NO];
 }
 
 - (IBAction)stopAccelerationPressed:(id)sender
@@ -459,6 +542,8 @@
     [self.startAccelerometer setEnabled:YES];
     [self.stopAccelerometer setEnabled:NO];
     [self.startLog setEnabled:YES];
+    [self.snoozeTimer invalidate];
+    self.snoozeStreamingButton.enabled = NO;
 }
 
 - (IBAction)startAccelerometerLog:(id)sender
