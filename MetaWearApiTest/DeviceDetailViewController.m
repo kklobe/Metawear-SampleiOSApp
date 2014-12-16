@@ -139,15 +139,13 @@
     if (self.device.state == CBPeripheralStateDisconnected) {
         [self setConnected:NO];
         [self.scrollView scrollRectToVisible:CGRectMake(0, 0, 10, 10) animated:YES];
+        if (self.accelerometerRunning) {
+            [self stopAccelerationPressed:self];
+        }
         if (self.autoReconnect.on) {
-            NSLog(@"Setting reconnectTimer (0)");
+            NSLog(@"Attempting reconnect (0)");
             dispatch_async(dispatch_get_main_queue(), ^{
-                self.reconnectTimer =
-                [NSTimer scheduledTimerWithTimeInterval:10.0
-                                                 target:self
-                                               selector:@selector(reconnectTimerElapsed:)
-                                               userInfo:nil
-                                                repeats:NO];
+                [self connectDevice:YES];
             });
         }
     }
@@ -171,11 +169,11 @@
                 hud.labelText = error.localizedDescription;
                 [hud hide:YES afterDelay:2];
                 if (self.autoReconnect.on) {
-                    NSLog(@"Setting reconnectTimer (1)");
-
-                    self.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:10.0 target:self selector:@selector(reconnectTimerElapsed:) userInfo:nil repeats:NO];
+                    NSLog(@"Attempting reconnect (1)");
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self connectDevice:YES];
+                    });
                 }
-
             } else {
                 hud.labelText = @"Connected!";
                 [hud hide:YES afterDelay:0.5];
@@ -193,11 +191,6 @@
             } else {
                 hud.labelText = @"Disconnected!";
                 [hud hide:YES afterDelay:0.5];
-                if (self.autoReconnect.on) {
-                    NSLog(@"Setting reconnectTimer (2)");
-
-                    self.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:10 target:self selector:@selector(reconnectTimerElapsed:) userInfo:nil repeats:NO];
-                }
             }
         }];
     }
